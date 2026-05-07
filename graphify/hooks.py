@@ -4,13 +4,13 @@ import re
 import subprocess
 from pathlib import Path
 
-_HOOK_MARKER = "# graphify-hook-start"
-_HOOK_MARKER_END = "# graphify-hook-end"
-_CHECKOUT_MARKER = "# graphify-checkout-hook-start"
-_CHECKOUT_MARKER_END = "# graphify-checkout-hook-end"
+_HOOK_MARKER = "# graphify-hook-start"  # post-commit 钩子开始标记
+_HOOK_MARKER_END = "# graphify-hook-end"  # post-commit 钩子结束标记
+_CHECKOUT_MARKER = "# graphify-checkout-hook-start"  # post-checkout 钩子开始标记
+_CHECKOUT_MARKER_END = "# graphify-checkout-hook-end"  # post-checkout 钩子结束标记
 
 _PYTHON_DETECT = """\
-# Detect the correct Python interpreter (handles pipx, venv, system installs)
+# 检测正确的 Python 解释器（支持 pipx、venv、系统安装）
 GRAPHIFY_BIN=$(command -v graphify 2>/dev/null)
 if [ -n "$GRAPHIFY_BIN" ]; then
     case "$GRAPHIFY_BIN" in
@@ -21,8 +21,7 @@ if [ -n "$GRAPHIFY_BIN" ]; then
         */env\\ *) GRAPHIFY_PYTHON="${_SHEBANG#*/env }" ;;
         *)         GRAPHIFY_PYTHON="$_SHEBANG" ;;
     esac
-    # Allowlist: only keep characters valid in a filesystem path to prevent
-    # injection if the shebang contains shell metacharacters
+    # 白名单：只保留文件系统路径中的有效字符，防止 shebang 包含 shell 元字符导致注入
     case "$GRAPHIFY_PYTHON" in
         *[!a-zA-Z0-9/_.@-]*) GRAPHIFY_PYTHON="" ;;
     esac
@@ -30,7 +29,7 @@ if [ -n "$GRAPHIFY_BIN" ]; then
         GRAPHIFY_PYTHON=""
     fi
 fi
-# Fall back: try python3, then python (Windows has no python3 shim)
+# 回退方案：尝试 python3，然后尝试 python（Windows 没有 python3 软链接）
 if [ -z "$GRAPHIFY_PYTHON" ]; then
     if command -v python3 >/dev/null 2>&1 && python3 -c "import graphify" 2>/dev/null; then
         GRAPHIFY_PYTHON="python3"
@@ -44,10 +43,10 @@ fi
 
 _HOOK_SCRIPT = """\
 # graphify-hook-start
-# Auto-rebuilds the knowledge graph after each commit (code files only, no LLM needed).
-# Installed by: graphify hook install
+# 每次提交后自动重建知识图谱（仅代码文件，无需 LLM）
+# 安装命令：graphify hook install
 
-# Skip during rebase/merge/cherry-pick to avoid blocking --continue with unstaged changes
+# 在 rebase/merge/cherry-pick 期间跳过执行，避免阻碍带有未暂存变更的 --continue 操作
 GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
 [ -d "$GIT_DIR/rebase-merge" ] && exit 0
 [ -d "$GIT_DIR/rebase-apply" ] && exit 0
@@ -86,24 +85,24 @@ except Exception as exc:
 
 _CHECKOUT_SCRIPT = """\
 # graphify-checkout-hook-start
-# Auto-rebuilds the knowledge graph (code only) when switching branches.
-# Installed by: graphify hook install
+# 切换分支时自动重建知识图谱（仅代码文件）
+# 安装命令：graphify hook install
 
 PREV_HEAD=$1
 NEW_HEAD=$2
 BRANCH_SWITCH=$3
 
-# Only run on branch switches, not file checkouts
+# 仅在分支切换时执行，文件检出时不执行
 if [ "$BRANCH_SWITCH" != "1" ]; then
     exit 0
 fi
 
-# Only run if graphify-out/ exists (graph has been built before)
+# 仅当 graphify-out/ 目录存在（图谱已构建过）时才执行
 if [ ! -d "graphify-out" ]; then
     exit 0
 fi
 
-# Skip during rebase/merge/cherry-pick
+# 在 rebase/merge/cherry-pick 期间跳过执行
 GIT_DIR=$(git rev-parse --git-dir 2>/dev/null)
 [ -d "$GIT_DIR/rebase-merge" ] && exit 0
 [ -d "$GIT_DIR/rebase-apply" ] && exit 0
@@ -127,7 +126,15 @@ except Exception as exc:
 
 
 def _git_root(path: Path) -> Path | None:
-    """Walk up to find .git directory."""
+    """
+    向上遍历查找包含 .git 目录的根目录。
+
+    参数：
+        path: 起始搜索路径
+
+    返回：
+        找到的 Git 仓库根目录路径，若未找到则返回 None
+    """
     current = path.resolve()
     for parent in [current, *current.parents]:
         if (parent / ".git").exists():
@@ -136,7 +143,15 @@ def _git_root(path: Path) -> Path | None:
 
 
 def _hooks_dir(root: Path) -> Path:
-    """Return the git hooks directory, respecting core.hooksPath if set (e.g. Husky)."""
+    """
+    获取 git 钩子目录路径，遵循 core.hooksPath 配置（例如 Husky）。
+
+    参数：
+        root: Git 仓库根目录
+
+    返回：
+        钩子目录的路径（如不存在则自动创建）
+    """
     try:
         result = subprocess.run(
             ["git", "-C", str(root), "config", "core.hooksPath"],
@@ -158,7 +173,18 @@ def _hooks_dir(root: Path) -> Path:
 
 
 def _install_hook(hooks_dir: Path, name: str, script: str, marker: str) -> str:
-    """Install a single git hook, appending if an existing hook is present."""
+    """
+    安装单个 git 钩子，若钩子已存在则追加内容。
+
+    参数：
+        hooks_dir: 钩子目录路径
+        name: 钩子名称（如 'post-commit'）
+        script: 要插入的钩子脚本内容
+        marker: 标识钩子所属的标记字符串
+
+    返回：
+        描述安装结果的状态信息
+    """
     hook_path = hooks_dir / name
     if hook_path.exists():
         content = hook_path.read_text(encoding="utf-8")
@@ -172,7 +198,18 @@ def _install_hook(hooks_dir: Path, name: str, script: str, marker: str) -> str:
 
 
 def _uninstall_hook(hooks_dir: Path, name: str, marker: str, marker_end: str) -> str:
-    """Remove graphify section from a git hook using start/end markers."""
+    """
+    使用开始/结束标记从 git 钩子中移除 graphify 相关代码段。
+
+    参数：
+        hooks_dir: 钩子目录路径
+        name: 钩子名称（如 'post-commit'）
+        marker: 开始标记字符串
+        marker_end: 结束标记字符串
+
+    返回：
+        描述卸载结果的状态信息
+    """
     hook_path = hooks_dir / name
     if not hook_path.exists():
         return f"no {name} hook found - nothing to remove."
@@ -193,7 +230,18 @@ def _uninstall_hook(hooks_dir: Path, name: str, marker: str, marker_end: str) ->
 
 
 def install(path: Path = Path(".")) -> str:
-    """Install graphify post-commit and post-checkout hooks in the nearest git repo."""
+    """
+    在最近的 git 仓库中安装 graphify 的 post-commit 和 post-checkout 钩子。
+
+    参数：
+        path: 仓库内的任意路径，默认为当前目录
+
+    返回：
+        描述安装结果的字符串信息
+
+    异常：
+        RuntimeError: 在给定路径或以上层级未找到 git 仓库时抛出
+    """
     root = _git_root(path)
     if root is None:
         raise RuntimeError(f"No git repository found at or above {path.resolve()}")
@@ -207,7 +255,18 @@ def install(path: Path = Path(".")) -> str:
 
 
 def uninstall(path: Path = Path(".")) -> str:
-    """Remove graphify post-commit and post-checkout hooks."""
+    """
+    移除 graphify 的 post-commit 和 post-checkout 钩子。
+
+    参数：
+        path: 仓库内的任意路径，默认为当前目录
+
+    返回：
+        描述卸载结果的字符串信息
+
+    异常：
+        RuntimeError: 在给定路径或以上层级未找到 git 仓库时抛出
+    """
     root = _git_root(path)
     if root is None:
         raise RuntimeError(f"No git repository found at or above {path.resolve()}")
@@ -220,7 +279,15 @@ def uninstall(path: Path = Path(".")) -> str:
 
 
 def status(path: Path = Path(".")) -> str:
-    """Check if graphify hooks are installed."""
+    """
+    检查 graphify 钩子是否已安装。
+
+    参数：
+        path: 仓库内的任意路径，默认为当前目录
+
+    返回：
+        描述 post-commit 和 post-checkout 钩子安装状态的字符串
+    """
     root = _git_root(path)
     if root is None:
         return "Not in a git repository."

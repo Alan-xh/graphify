@@ -34,16 +34,33 @@ def _normalize_id(s: str) -> str:
 
     Used to reconcile edge endpoints when the LLM generates IDs with slightly
     different punctuation or casing than the AST extractor.
+
+    Args:
+        s: 原始ID字符串
+
+    Returns:
+        规范化后的ID字符串（小写，非字母数字字符替换为下划线）
     """
     cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", s)
     return cleaned.strip("_").lower()
 
 
 def build_from_json(extraction: dict, *, directed: bool = False) -> nx.Graph:
-    """Build a NetworkX graph from an extraction dict.
+    """从提取字典构建NetworkX图。
 
-    directed=True produces a DiGraph that preserves edge direction (source→target).
-    directed=False (default) produces an undirected Graph for backward compatibility.
+    将JSON格式的节点和边数据转换为NetworkX图对象。支持有向图和无向图两种模式。
+    自动处理遗留数据格式（如"links"字段）和字段名兼容性问题（如"source" -> "source_file"）。
+
+    Args:
+        extraction: 包含"nodes"、"edges"（或"links"）、可选"hyperedges"的字典
+        directed: True返回有向图(DiGraph)，False返回无向图(Graph)，默认为False
+
+    Returns:
+        构建好的NetworkX图对象
+
+    Note:
+        有向图模式下边方向被保留（source->target）；
+        无向图模式下边方向信息仍存储在边的"_src"和"_tgt"属性中以备显示用。
     """
     # NetworkX <= 3.1 serialised edges as "links"; remap to "edges" for compatibility.
     if "edges" not in extraction and "links" in extraction:
@@ -107,15 +124,20 @@ def build_from_json(extraction: dict, *, directed: bool = False) -> nx.Graph:
 
 
 def build(extractions: list[dict], *, directed: bool = False) -> nx.Graph:
-    """Merge multiple extraction results into one graph.
+    """合并多个提取结果为一个图。
 
-    directed=True produces a DiGraph that preserves edge direction (source→target).
-    directed=False (default) produces an undirected Graph for backward compatibility.
+    按顺序合并多个提取字典中的节点、边和超边。对于相同ID的节点，后出现的节点属性会覆盖先出现的节点属性。
+    建议先传入AST提取结果，再传入语义提取结果，以便语义标签覆盖AST节点。
 
-    Extractions are merged in order. For nodes with the same ID, the last
-    extraction's attributes win (NetworkX add_node overwrites). Pass AST
-    results before semantic results so semantic labels take precedence, or
-    reverse the order if you prefer AST source_location precision to win.
+    Args:
+        extractions: 提取字典列表，每个字典应包含"nodes"、"edges"等字段
+        directed: True返回有向图(DiGraph)，False返回无向图(Graph)，默认为False
+
+    Returns:
+        合并后的NetworkX图对象
+
+    Note:
+        NetworkX的add_node()是幂等的，重复添加相同ID的节点会用新属性覆盖旧属性。
     """
     combined: dict = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0}
     for ext in extractions:
@@ -128,15 +150,38 @@ def build(extractions: list[dict], *, directed: bool = False) -> nx.Graph:
 
 
 def _norm_label(label: str) -> str:
-    """Canonical dedup key — lowercase, alphanumeric only."""
+    """计算标准化后的标签去重键。
+
+    将标签转换为小写并移除非字母数字字符，用于节点标签的模糊匹配去重。
+
+    Args:
+        label: 原始标签字符串
+
+    Returns:
+        标准化后的去重键字符串
+    """
     return re.sub(r"[^a-z0-9 ]", "", label.lower()).strip()
 
 
 def deduplicate_by_label(nodes: list[dict], edges: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Merge nodes that share a normalised label, rewriting edge references.
+    """合并具有相同标准化标签的节点，并重写相关边的引用。
 
-    Prefers IDs without chunk suffixes (_c\\d+) and shorter IDs when tied.
-    Drops self-loops created by the merge. Called in build() automatically.
+    当多个节点拥有相似的标签时，将它们合并为一个节点。合并策略：
+    - 优先保留没有分块后缀(_c\\d+)的节点ID
+    - 当后缀情况相同时，保留ID字符串较短的节点
+    - 合并后自动丢弃产生的自环边
+
+    Args:
+        nodes: 节点字典列表，每个节点需包含"id"和可选的"label"字段
+        edges: 边字典列表，每条边需包含"source"和"target"字段
+
+    Returns:
+        元组(deduped_nodes, deduped_edges)：
+        - deduped_nodes: 去重后的节点列表
+        - deduped_edges: 更新引用后的边列表（不含自环边）
+
+    Note:
+        该函数在build()中自动调用，无需手动调用。
     """
     _CHUNK_SUFFIX = re.compile(r"_c\d+$")
     canonical: dict[str, dict] = {}  # norm_label -> surviving node
@@ -185,10 +230,27 @@ def build_merge(
     *,
     directed: bool = False,
 ) -> nx.Graph:
-    """Load existing graph.json, merge new chunks into it, and save back.
+    """加载现有图文件，合并新的提取块，并保存回文件。
 
-    Never replaces — only grows (or prunes deleted-file nodes via prune_sources).
-    Safe to call repeatedly: existing nodes and edges are preserved.
+    该函数用于增量更新图数据：读取已有的graph.json文件，将新的提取结果合并进去，
+    然后保存回原路径。可选地支持删除已移除源文件对应的节点。
+
+    Args:
+        new_chunks: 新的提取字典列表（每个字典通常对应一次LLM提取结果）
+        graph_path: 现有图文件的路径，默认为"graphify-out/graph.json"
+        prune_sources: 需要删除其节点的源文件路径列表，默认为None表示不删除
+        directed: True返回有向图(DiGraph)，False返回无向图(Graph)，默认为False
+
+    Returns:
+        合并后的NetworkX图对象
+
+    Raises:
+        ValueError: 当合并后节点数少于原图节点数且未显式指定prune_sources时抛出异常，
+                    防止意外缩小图规模
+
+    Note:
+        该函数永远不会替换原有图数据——只会增加数据（或通过prune_sources显式删除）。
+        可安全重复调用：现有节点和边都会被保留。
     """
     from networkx.readwrite import json_graph as _jg
 
